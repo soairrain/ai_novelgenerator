@@ -4,6 +4,7 @@ from options_buyer.core.iv_crush import estimate_iv_crush
 from options_buyer.core.liquidity import check_liquidity, pick_best_contract
 from options_buyer.core.r import compute_r, structure_target_ok
 from options_buyer.core.sizing import floor_contracts, size_long_or_debit
+from options_buyer.core.spreads import validate_credit_spread, validate_debit_spread
 from options_buyer.core.types import (
     AccountState,
     OptionQuote,
@@ -29,4 +30,6 @@ __all__ = [
     "pnl_in_r",
     "size_long_or_debit",
     "structure_target_ok",
+    "validate_credit_spread",
+    "validate_debit_spread",
 ]

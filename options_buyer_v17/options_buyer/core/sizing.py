@@ -63,10 +63,27 @@ def can_open_premium(
     category: StrategyCategory,
     strategy: StrategyType,
     margin: float = 0.0,
+    max_loss: float | None = None,
 ) -> tuple[bool, str]:
-    """开仓前仓位与日亏检查。"""
+    """开仓前仓位与日亏检查。
+
+    - 裸买/借方：权利金预算（单笔 0.5% / 类别 2% / 合计 3%）
+    - 信用价差：权利金预算不适用 max_loss；以保证金 ≤3% 为主；
+      日亏检查用 max_loss（风险占用）与「日已实现净亏损 + 新仓风险 ≤2%」对齐
+    """
     if account.halted:
         return False, f"已停机: {account.halt_reason}"
+
+    day_loss = max(0.0, -account.day_realized_pnl)
+
+    if strategy == StrategyType.CREDIT_SPREAD:
+        # 文稿：保证金与权利金预算独立；信用实际约束通常是保证金。
+        # 「日亏+新仓权利金≤2%」针对买方权利金；信用不把 max_loss 叠进该权利金口径。
+        if day_loss >= account.equity * DAY_LOSS_HARD_CAP - 1e-9:
+            return False, "日已实现净亏损已达 2%"
+        if not credit_margin_ok(account.equity, margin):
+            return False, "单笔信用价差保证金超过账户 3%"
+        return True, "ok"
 
     if new_premium > account.equity * SINGLE_PREMIUM_MAX + 1e-9:
         return False, "单笔权利金超过账户 0.5%"
@@ -80,15 +97,25 @@ def can_open_premium(
         return False, "合计权利金超过账户 3%"
 
     # 日已实现净亏损 + 新仓权利金 ≤ 2%
-    day_loss = max(0.0, -account.day_realized_pnl)
     if day_loss + new_premium > account.equity * DAY_LOSS_HARD_CAP + 1e-9:
         return False, "日已实现净亏损 + 新仓权利金超过 2%"
 
-    if strategy == StrategyType.CREDIT_SPREAD:
-        if not credit_margin_ok(account.equity, margin):
-            return False, "单笔信用价差保证金超过账户 3%"
-
     return True, "ok"
+
+
+def cap_contracts_by_notional(
+    equity: float,
+    spot: float,
+    contracts: int,
+    *,
+    max_multiple: float = 5.0,
+) -> int:
+    """名义敞口 > 账户 5 倍时降张数（3.4.4）。"""
+    if contracts < 1 or spot <= 0 or equity <= 0:
+        return 0
+    while contracts >= 1 and contracts * MULTIPLIER * spot > equity * max_multiple:
+        contracts -= 1
+    return contracts
 
 
 def signal_add_ok(

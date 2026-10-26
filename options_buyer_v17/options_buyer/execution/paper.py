@@ -9,11 +9,16 @@ from options_buyer.core.exits import (
     ExitAction,
     ExitDecision,
     credit_spread_exit,
+    iv_path_override,
     long_or_debit_exit,
     pnl_in_r,
 )
 from options_buyer.core.r import compute_r, structure_target_ok
-from options_buyer.core.sizing import can_open_premium, size_long_or_debit
+from options_buyer.core.sizing import (
+    can_open_premium,
+    cap_contracts_by_notional,
+    size_long_or_debit,
+)
 from options_buyer.core.types import (
     MULTIPLIER,
     AccountState,
@@ -69,6 +74,7 @@ class PaperBroker:
         structure_target_r: float,
         half_size: bool = False,
         is_add: bool = False,
+        spot: float | None = None,
     ) -> Position | None:
         psych = halt_mod.size_multiplier_psychology(self.account) < 1.0
         decision = size_long_or_debit(
@@ -76,10 +82,16 @@ class PaperBroker:
         )
         if not decision.ok:
             return None
+        contracts = decision.contracts
+        if spot is not None:
+            contracts = cap_contracts_by_notional(self.account.equity, spot, contracts)
+            if contracts < 1:
+                return None
+        premium_cost = contracts * premium * MULTIPLIER
 
         ok, _ = can_open_premium(
             self.account,
-            new_premium=decision.premium_cost,
+            new_premium=premium_cost,
             category=category,
             strategy=StrategyType.LONG,
         )
@@ -88,14 +100,14 @@ class PaperBroker:
         if not structure_target_ok(structure_target_r, StrategyType.LONG):
             return None
 
-        rspec = compute_r(StrategyType.LONG, premium=premium, contracts=decision.contracts)
+        rspec = compute_r(StrategyType.LONG, premium=premium, contracts=contracts)
         pid = str(uuid.uuid4())[:8]
         pos = Position(
             position_id=pid,
             strategy=StrategyType.LONG,
             category=category,
             symbol=symbol,
-            contracts=decision.contracts,
+            contracts=contracts,
             entry_premium=premium,
             r_dollars=rspec.r_dollars,
             r_per_contract=rspec.r_per_contract,
@@ -104,10 +116,69 @@ class PaperBroker:
             is_add=is_add,
             added_once=is_add,
         )
-        self._reserve(pos, decision.premium_cost)
+        self._reserve(pos, premium_cost)
         self.positions[pid] = pos
         self.account.opens_today += 1
-        self.fills.append(Fill(pid, "buy", decision.contracts, premium))
+        self.fills.append(Fill(pid, "buy", contracts, premium))
+        return pos
+
+    def open_debit(
+        self,
+        *,
+        symbol: str,
+        net_debit: float,
+        category: StrategyCategory,
+        dte: int,
+        structure_target_r: float,
+        width: float = 0.0,
+        half_size: bool = False,
+        spot: float | None = None,
+    ) -> Position | None:
+        psych = halt_mod.size_multiplier_psychology(self.account) < 1.0
+        decision = size_long_or_debit(
+            self.account.equity, net_debit, half_size=half_size or psych
+        )
+        if not decision.ok:
+            return None
+        contracts = decision.contracts
+        if spot is not None:
+            contracts = cap_contracts_by_notional(self.account.equity, spot, contracts)
+            if contracts < 1:
+                return None
+        premium_cost = contracts * net_debit * MULTIPLIER
+
+        ok, _ = can_open_premium(
+            self.account,
+            new_premium=premium_cost,
+            category=category,
+            strategy=StrategyType.DEBIT_SPREAD,
+        )
+        if not ok:
+            return None
+        if not structure_target_ok(structure_target_r, StrategyType.DEBIT_SPREAD):
+            return None
+
+        rspec = compute_r(
+            StrategyType.DEBIT_SPREAD, debit=net_debit, contracts=contracts
+        )
+        pid = str(uuid.uuid4())[:8]
+        pos = Position(
+            position_id=pid,
+            strategy=StrategyType.DEBIT_SPREAD,
+            category=category,
+            symbol=symbol,
+            contracts=contracts,
+            entry_premium=net_debit,
+            width=width,
+            r_dollars=rspec.r_dollars,
+            r_per_contract=rspec.r_per_contract,
+            dte_at_entry=dte,
+            structure_target_r=structure_target_r,
+        )
+        self._reserve(pos, premium_cost)
+        self.positions[pid] = pos
+        self.account.opens_today += 1
+        self.fills.append(Fill(pid, "buy_debit", contracts, net_debit))
         return pos
 
     def open_credit(
@@ -125,10 +196,11 @@ class PaperBroker:
         max_loss = (width - credit) * MULTIPLIER * contracts
         ok, _ = can_open_premium(
             self.account,
-            new_premium=max_loss,
+            new_premium=0.0,  # 信用不以权利金 0.5% 约束
             category=category,
             strategy=StrategyType.CREDIT_SPREAD,
             margin=margin,
+            max_loss=max_loss,
         )
         if not ok:
             return None
@@ -157,6 +229,7 @@ class PaperBroker:
             structure_target_r=structure_target_r,
             margin=margin,
         )
+        # 风险占用按最大亏损记账（非权利金预算口径）
         self._reserve(pos, max_loss)
         self.positions[pid] = pos
         self.account.opens_today += 1
@@ -170,6 +243,10 @@ class PaperBroker:
         mark: float,
         dte: int,
         short_leg_distance_atr: float | None = None,
+        short_delta: float | None = None,
+        iv_entry: float | None = None,
+        iv_now: float | None = None,
+        at_structure_target: bool = False,
     ) -> Fill | None:
         pos = self.positions.get(position_id)
         if not pos:
@@ -186,7 +263,10 @@ class PaperBroker:
 
         if pos.strategy == StrategyType.CREDIT_SPREAD:
             decision = credit_spread_exit(
-                dte=dte, pnl_r=pr, short_leg_distance_atr=short_leg_distance_atr
+                dte=dte,
+                pnl_r=pr,
+                short_leg_distance_atr=short_leg_distance_atr,
+                short_delta=short_delta,
             )
         else:
             decision = long_or_debit_exit(
@@ -194,7 +274,24 @@ class PaperBroker:
                 pnl_r=pr,
                 structure_target_r=pos.structure_target_r,
                 remaining_fraction=pos.remaining_fraction,
+                strategy=pos.strategy,
             )
+
+        # IV 路径覆盖（标的到目标时）
+        if iv_entry is not None and iv_now is not None:
+            iv_dec = iv_path_override(
+                iv_entry=iv_entry,
+                iv_now=iv_now,
+                at_structure_target=at_structure_target,
+            )
+            if iv_dec is not None:
+                if iv_dec.action == ExitAction.HOLD and decision.action != ExitAction.HOLD:
+                    # 绝对上升 >10：继续持有剩余（打断减半后的继续平仓由调用方控制；
+                    # 此处若决策是全平且 IV 上升，改为持有）
+                    if decision.action == ExitAction.CLOSE_ALL and "上升" in iv_dec.detail:
+                        decision = iv_dec
+                elif iv_dec.action == ExitAction.CLOSE_ALL:
+                    decision = iv_dec
 
         if decision.action == ExitAction.HOLD:
             return None

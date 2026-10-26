@@ -54,13 +54,23 @@ def long_or_debit_exit(
     pnl_r: float,
     structure_target_r: float,
     remaining_fraction: float = 1.0,
+    strategy: StrategyType = StrategyType.LONG,
 ) -> ExitDecision:
     """裸买 / 借方价差止盈止损。"""
     if pnl_r <= -1.0:
         return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.STOP_1R, "亏损达 1R")
 
     if dte < TIME_STOP_DTE:
-        # 不新开；已有仓位盈利 1R 即平；亏损仍按止损 1R
+        if strategy == StrategyType.DEBIT_SPREAD:
+            # §4.2 / §3.5.2：剩余 DTE <7 且未达 1.5R → 平仓，不滚动
+            if pnl_r < 1.5:
+                return ExitDecision(
+                    ExitAction.CLOSE_ALL,
+                    ExitReason.TIME_STOP,
+                    "借方 DTE<7 未达 1.5R → 平仓",
+                )
+            return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "借方 DTE<7 已达 1.5R 全平")
+        # 裸买：不新开；已有仓位盈利 1R 即平；亏损仍按止损 1R
         if pnl_r >= 1.0:
             return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "DTE<7 盈利 1R 即平")
         return ExitDecision(ExitAction.HOLD, None, "DTE<7 未达盈利 1R，等待止损/时间")
@@ -92,8 +102,13 @@ def credit_spread_exit(
     dte: int,
     pnl_r: float,
     short_leg_distance_atr: float | None = None,
+    short_delta: float | None = None,
 ) -> ExitDecision:
-    """信用价差：止盈 = 1R；止损 = 1R。"""
+    """信用价差：止盈 = 1R；止损 = 1R；短腿 Delta >0.50 平仓。"""
+    if short_delta is not None and abs(short_delta) > 0.50:
+        return ExitDecision(
+            ExitAction.CLOSE_ALL, ExitReason.STOP_1R, "短腿 Delta >0.50 平仓"
+        )
     if pnl_r <= -1.0:
         return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.STOP_1R, "信用价差亏损 1R")
     if pnl_r >= 1.0:

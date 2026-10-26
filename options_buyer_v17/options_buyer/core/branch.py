@@ -25,6 +25,7 @@ def choose_branch(
     event_window: bool,
     category: StrategyCategory,
     want_naked_despite_high_iv: bool = False,
+    strong_gex_suppress: bool = False,
 ) -> BranchDecision:
     if event_window:
         return BranchDecision(
@@ -93,14 +94,15 @@ def choose_branch(
         )
 
     if category == StrategyCategory.ABSORPTION_3A:
-        if iv_rank >= 50 or positive_gex:
+        # 3A 常态就在正 GEX；仅 IVR>50 或明确「强抑制」才改价差（§5.2）
+        if iv_rank > 50 or strong_gex_suppress:
             return BranchDecision(
                 StrategyType.DEBIT_SPREAD,
                 0.50,
                 0.60,
                 30,
                 45,
-                "3A + 高IV/强正GEX → 牛市价差",
+                "3A + IVR>50/强正GEX抑制 → 牛市价差",
                 False,
             )
         return BranchDecision(
@@ -109,7 +111,7 @@ def choose_branch(
             0.70,
             14,
             30,
-            "3A 吸收裸买",
+            "3A 吸收裸买（正 GEX 结构位，IVR≤50）",
             True,
         )
 
