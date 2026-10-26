@@ -46,7 +46,8 @@ class PaperBroker:
     positions: dict[str, Position] = field(default_factory=dict)
     fills: list[Fill] = field(default_factory=list)
 
-    def _reserve(self, pos: Position, amount: float) -> None:
+    def _reserve_premium(self, pos: Position, amount: float) -> None:
+        """买方/借方：占用权利金预算。"""
         pos.premium_reserved = amount
         self.account.open_premium_total += amount
         cat = pos.category.value
@@ -54,7 +55,7 @@ class PaperBroker:
             self.account.open_premium_by_category.get(cat, 0.0) + amount
         )
 
-    def _release(self, pos: Position, fraction: float = 1.0) -> float:
+    def _release_premium(self, pos: Position, fraction: float = 1.0) -> float:
         amount = pos.premium_reserved * fraction
         self.account.open_premium_total = max(0.0, self.account.open_premium_total - amount)
         cat = pos.category.value
@@ -63,6 +64,20 @@ class PaperBroker:
         )
         pos.premium_reserved = max(0.0, pos.premium_reserved - amount)
         return amount
+
+    def _reserve_credit_margin(self, pos: Position, margin: float) -> None:
+        """信用价差：只占用保证金，不计入权利金预算（§4.3）。"""
+        pos.margin = margin
+        pos.premium_reserved = 0.0
+        self.account.open_credit_margin_total += margin
+
+    def _release_credit_margin(self, pos: Position) -> float:
+        m = pos.margin
+        self.account.open_credit_margin_total = max(
+            0.0, self.account.open_credit_margin_total - m
+        )
+        pos.margin = 0.0
+        return m
 
     def open_long(
         self,
@@ -116,7 +131,7 @@ class PaperBroker:
             is_add=is_add,
             added_once=is_add,
         )
-        self._reserve(pos, premium_cost)
+        self._reserve_premium(pos, premium_cost)
         self.positions[pid] = pos
         self.account.opens_today += 1
         self.fills.append(Fill(pid, "buy", contracts, premium))
@@ -175,7 +190,7 @@ class PaperBroker:
             dte_at_entry=dte,
             structure_target_r=structure_target_r,
         )
-        self._reserve(pos, premium_cost)
+        self._reserve_premium(pos, premium_cost)
         self.positions[pid] = pos
         self.account.opens_today += 1
         self.fills.append(Fill(pid, "buy_debit", contracts, net_debit))
@@ -229,8 +244,7 @@ class PaperBroker:
             structure_target_r=structure_target_r,
             margin=margin,
         )
-        # 风险占用按最大亏损记账（非权利金预算口径）
-        self._reserve(pos, max_loss)
+        self._reserve_credit_margin(pos, margin)
         self.positions[pid] = pos
         self.account.opens_today += 1
         self.fills.append(Fill(pid, "sell_credit", contracts, credit))
@@ -277,18 +291,24 @@ class PaperBroker:
                 strategy=pos.strategy,
             )
 
-        # IV 路径覆盖（标的到目标时）
-        if iv_entry is not None and iv_now is not None:
+        # IV 路径覆盖（标的到目标时）；不得覆盖硬止损
+        if (
+            iv_entry is not None
+            and iv_now is not None
+            and decision.reason != ExitReason.STOP_1R
+        ):
             iv_dec = iv_path_override(
                 iv_entry=iv_entry,
                 iv_now=iv_now,
                 at_structure_target=at_structure_target,
             )
             if iv_dec is not None:
-                if iv_dec.action == ExitAction.HOLD and decision.action != ExitAction.HOLD:
-                    # 绝对上升 >10：继续持有剩余（打断减半后的继续平仓由调用方控制；
-                    # 此处若决策是全平且 IV 上升，改为持有）
-                    if decision.action == ExitAction.CLOSE_ALL and "上升" in iv_dec.detail:
+                if iv_dec.action == ExitAction.HOLD and decision.action in (
+                    ExitAction.CLOSE_ALL,
+                    ExitAction.CLOSE_HALF,
+                ):
+                    # IV 绝对上升 >10：继续持有剩余（可打断止盈全平）
+                    if "上升" in iv_dec.detail:
                         decision = iv_dec
                 elif iv_dec.action == ExitAction.CLOSE_ALL:
                     decision = iv_dec
@@ -304,7 +324,7 @@ class PaperBroker:
         if decision.action == ExitAction.CLOSE_HALF:
             closed = pos.contracts // 2
             pnl = (mark - pos.entry_premium) * MULTIPLIER * closed
-            self._release(pos, 0.5)
+            self._release_premium(pos, 0.5)
             pos.remaining_fraction = 0.5
             pos.contracts = pos.contracts - closed
             halt_mod.apply_realized_pnl(self.account, pnl)
@@ -319,10 +339,11 @@ class PaperBroker:
         # CLOSE_ALL
         if pos.strategy == StrategyType.CREDIT_SPREAD:
             pnl = (pos.credit - mark) * MULTIPLIER * pos.contracts
+            self._release_credit_margin(pos)
         else:
             pnl = (mark - pos.entry_premium) * MULTIPLIER * pos.contracts
+            self._release_premium(pos, 1.0)
 
-        self._release(pos, 1.0)
         halt_mod.apply_realized_pnl(self.account, pnl)
         if decision.reason == ExitReason.STOP_1R:
             halt_mod.record_stop(self.account)

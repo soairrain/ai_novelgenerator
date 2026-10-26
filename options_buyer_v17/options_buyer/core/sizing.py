@@ -78,11 +78,14 @@ def can_open_premium(
 
     if strategy == StrategyType.CREDIT_SPREAD:
         # 文稿：保证金与权利金预算独立；信用实际约束通常是保证金。
-        # 「日亏+新仓权利金≤2%」针对买方权利金；信用不把 max_loss 叠进该权利金口径。
+        # 「日亏+新仓权利金≤2%」针对买方权利金；信用不把 max_loss 叠进权利金口径。
         if day_loss >= account.equity * DAY_LOSS_HARD_CAP - 1e-9:
             return False, "日已实现净亏损已达 2%"
         if not credit_margin_ok(account.equity, margin):
             return False, "单笔信用价差保证金超过账户 3%"
+        # 合计保证金也不应无界膨胀（单笔已 ≤3%；多笔合计再给一层软顶 = 权益）
+        if account.open_credit_margin_total + margin > account.equity + 1e-9:
+            return False, "信用价差保证金合计超过账户权益"
         return True, "ok"
 
     if new_premium > account.equity * SINGLE_PREMIUM_MAX + 1e-9:

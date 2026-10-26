@@ -123,6 +123,8 @@ class AccountState:
     day_realized_pnl: float = 0.0
     open_premium_by_category: dict[str, float] = field(default_factory=dict)
     open_premium_total: float = 0.0
+    # 信用价差保证金占用（与权利金预算独立，§4.3 / §六）
+    open_credit_margin_total: float = 0.0
     consecutive_stops: int = 0
     halted: bool = False
     halt_reason: Optional[str] = None

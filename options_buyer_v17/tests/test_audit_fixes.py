@@ -96,3 +96,55 @@ def test_spread_builders():
     assert not validate_credit_spread(
         short_delta=0.25, protect_delta=0.10, width=5.0, net_credit=2.0
     ).ok
+
+
+def test_e9_credit_margin_does_not_block_long_premium_budget():
+    """信用保证金不得占用权利金合计 3% 预算。"""
+    a = AccountState(equity=50_000)
+    broker = PaperBroker(a)
+    c = broker.open_credit(
+        symbol="SPX",
+        width=15.0,
+        credit=7.5,
+        margin=1_500,
+        category=StrategyCategory.MEAN_REVERSION,
+        dte=30,
+        structure_target_r=1.0,
+    )
+    assert c is not None
+    assert a.open_premium_total == 0.0
+    assert a.open_credit_margin_total == 1_500
+    # 仍可开满单笔 0.5% 裸买（$2 → 1 张 = $200）
+    p = broker.open_long(
+        symbol="SPY",
+        premium=2.0,
+        category=StrategyCategory.BREAKOUT,
+        dte=30,
+        structure_target_r=2.0,
+    )
+    assert p is not None
+    assert a.open_premium_total == 200.0
+
+
+def test_e10_iv_rise_must_not_block_stop_loss():
+    """IV 绝对上升不得覆盖 1R 止损。"""
+    a = AccountState(equity=50_000)
+    broker = PaperBroker(a)
+    p = broker.open_long(
+        symbol="SPY",
+        premium=2.0,
+        category=StrategyCategory.BREAKOUT,
+        dte=30,
+        structure_target_r=2.0,
+    )
+    assert p
+    fill = broker.mark_exit(
+        p.position_id,
+        mark=1.0,  # -1R
+        dte=25,
+        iv_entry=20.0,
+        iv_now=35.0,  # 绝对上升 15 点
+        at_structure_target=True,
+    )
+    assert fill is not None
+    assert a.consecutive_stops == 1
