@@ -83,14 +83,25 @@ def choose_branch(
         )
 
     if category == StrategyCategory.BREAKOUT:
+        # §5.1：IVR<50 裸买；IVR>50 已在上方处理。IVR==50 落在 30–50 → 优先价差
+        if iv_rank < 50:
+            return BranchDecision(
+                StrategyType.LONG,
+                0.30,
+                0.50,
+                21,
+                45,
+                "突破/趋势裸买",
+                True,
+            )
         return BranchDecision(
-            StrategyType.LONG,
-            0.30,
+            StrategyType.DEBIT_SPREAD,
             0.50,
-            21,
+            0.60,
+            30,
             45,
-            "突破/趋势裸买",
-            True,
+            "突破但 IVR≥50 边界 → 借方价差",
+            False,
         )
 
     if category == StrategyCategory.ABSORPTION_3A:

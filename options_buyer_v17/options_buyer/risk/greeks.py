@@ -30,7 +30,8 @@ class PortfolioGreeks:
     net_vega_usd: float
     net_theta: float
     net_gamma: float
-    ok: bool
+    ok: bool  # Delta/Vega 硬限；True 时仍可能 block_new_buyer
+    block_new_buyer: bool  # 净 Theta>0 → 不加买方仓位（信用仍可）
     reasons: tuple[str, ...]
 
 
@@ -52,15 +53,26 @@ def aggregate(legs: list[LegGreeks], equity: float) -> PortfolioGreeks:
         ng += leg.gamma * m
 
     reasons: list[str] = []
+    hard_fail = False
+    block_buyer = False
     if abs(nd) > equity * NET_DELTA_MAX:
         reasons.append(f"净 Delta 美元敞口 {nd:.0f} 超过账户 10%")
+        hard_fail = True
     if abs(nv) > equity * NET_VEGA_MAX:
         reasons.append(f"净 Vega {nv:.0f} 超过账户 0.5%/IV点")
+        hard_fail = True
     if nt > 0:
-        reasons.append("净 Theta 为正，不加买方仓位")
+        reasons.append("净 Theta 为正，不加买方仓位（信用价差仍可开）")
+        block_buyer = True
     elif abs(nt) > equity * NET_THETA_WARN:
         reasons.append("净 Theta 负向超过账户 0.1%/天，检查过度持有")
 
-    # Theta 警告不硬阻断买方以外的场景；净 Theta>0 与 Delta/Vega 超限硬阻断
-    hard = [r for r in reasons if not r.startswith("净 Theta 负向")]
-    return PortfolioGreeks(nd, nv, nt, ng, ok=len(hard) == 0, reasons=tuple(reasons))
+    return PortfolioGreeks(
+        nd,
+        nv,
+        nt,
+        ng,
+        ok=not hard_fail,
+        block_new_buyer=block_buyer,
+        reasons=tuple(reasons),
+    )

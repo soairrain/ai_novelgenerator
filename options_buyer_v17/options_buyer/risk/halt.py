@@ -15,10 +15,19 @@ from options_buyer.core.types import (
 )
 
 
+def _day_loss_halt_frozen(account: AccountState) -> bool:
+    """日亏硬上限触发后，连续止损计数冻结（不再 +1 / 不再因盈利归 0）。"""
+    if not account.halted or not account.halt_reason:
+        return False
+    r = account.halt_reason
+    return "日亏" in r or "日已实现净亏损" in r
+
+
 def record_stop(account: AccountState, *, is_add_leg: bool = False) -> AccountState:
-    """止损平仓：+1 笔（加仓亏损仍只 +1，调用方对整笔平仓调用一次）。"""
-    if account.halted and account.halt_reason and "日亏" in account.halt_reason:
-        return account  # 日亏停机后不再重置计数
+    """止损平仓：+1 笔（加仓后整笔亏 2R 仍只 +1，调用方对整笔平仓调用一次）。"""
+    del is_add_leg  # 整笔一次平仓由调用方保证；不因加仓多计或零计
+    if _day_loss_halt_frozen(account):
+        return account
 
     account.consecutive_stops += 1
     if account.consecutive_stops >= CONSECUTIVE_STOP_HALT:
@@ -29,7 +38,7 @@ def record_stop(account: AccountState, *, is_add_leg: bool = False) -> AccountSt
 
 def record_win(account: AccountState) -> AccountState:
     """盈利平仓 → 连续止损计数归 0。"""
-    if account.halted and account.halt_reason and "日亏" in (account.halt_reason or ""):
+    if _day_loss_halt_frozen(account):
         return account
     account.consecutive_stops = 0
     account.wins_today += 1
@@ -48,7 +57,7 @@ def apply_realized_pnl(account: AccountState, pnl: float) -> AccountState:
     day_loss = max(0.0, -account.day_realized_pnl)
     if day_loss >= account.equity * DAY_LOSS_HARD_CAP - 1e-9:
         account.halted = True
-        account.halt_reason = "日已实现净亏损达 2%（硬上限）"
+        account.halt_reason = "日亏硬上限：日已实现净亏损达 2%"
     if pnl <= 0:
         account.consecutive_wins = 0
     return account

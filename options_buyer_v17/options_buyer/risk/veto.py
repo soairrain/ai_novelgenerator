@@ -34,6 +34,7 @@ class VetoContext:
     protect_leg_ok: bool = True
     mr_target_inside_short: bool = True
     greeks_ok: bool = True
+    block_new_buyer: bool = False  # 净 Theta>0：禁买方，信用仍可
     extreme_halt: bool = False
     correlation_premium_pct: float = 0.0
     structure_target_r: float = 1.5
@@ -102,7 +103,14 @@ def evaluate_vetoes(account: AccountState, ctx: VetoContext) -> VetoResult:
         reasons.append("16. 均值回归信用价差目标在短腿外侧")
 
     if not ctx.greeks_ok:
-        reasons.append("17. 组合净 Delta/Vega/Theta 超限")
+        reasons.append("17. 组合净 Delta/Vega 超限")
+
+    if ctx.block_new_buyer and ctx.strategy in (
+        StrategyType.LONG,
+        StrategyType.DEBIT_SPREAD,
+        StrategyType.DEEP_ITM,
+    ):
+        reasons.append("17. 净 Theta 为正，不加买方仓位")
 
     # 18 PDT
     if (

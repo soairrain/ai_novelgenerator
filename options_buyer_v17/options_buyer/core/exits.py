@@ -14,6 +14,10 @@ class ExitAction(str, Enum):
     CLOSE_HALF = "close_half"
 
 
+# 权利金浮点噪声：1.5R 常见差 1e-16
+_R_EPS = 1e-9
+
+
 @dataclass(frozen=True)
 class ExitDecision:
     action: ExitAction
@@ -57,13 +61,13 @@ def long_or_debit_exit(
     strategy: StrategyType = StrategyType.LONG,
 ) -> ExitDecision:
     """裸买 / 借方价差止盈止损。"""
-    if pnl_r <= -1.0:
+    if pnl_r <= -1.0 + _R_EPS:
         return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.STOP_1R, "亏损达 1R")
 
     if dte < TIME_STOP_DTE:
         if strategy == StrategyType.DEBIT_SPREAD:
             # §4.2 / §3.5.2：剩余 DTE <7 且未达 1.5R → 平仓，不滚动
-            if pnl_r < 1.5:
+            if pnl_r < 1.5 - _R_EPS:
                 return ExitDecision(
                     ExitAction.CLOSE_ALL,
                     ExitReason.TIME_STOP,
@@ -71,27 +75,35 @@ def long_or_debit_exit(
                 )
             return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "借方 DTE<7 已达 1.5R 全平")
         # 裸买：不新开；已有仓位盈利 1R 即平；亏损仍按止损 1R
-        if pnl_r >= 1.0:
+        if pnl_r >= 1.0 - _R_EPS:
             return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "DTE<7 盈利 1R 即平")
         return ExitDecision(ExitAction.HOLD, None, "DTE<7 未达盈利 1R，等待止损/时间")
 
     # 结构目标 <2R → 1.5R 全平
     full_at_1_5 = structure_target_r < 2.0
 
-    if dte < 14:
-        # 7–14：1.5R 全平（不减半）
-        if pnl_r >= 1.5:
+    # 借方：§4.2 仅「1.5R 减半 / 2R 全平」，无裸买 7–14 全平档
+    # 裸买/Deep ITM：7–14 → 1.5R 全平（不减半）；≥14 → 1.5R 减半
+    if strategy != StrategyType.DEBIT_SPREAD and dte < 14:
+        if pnl_r >= 1.5 - _R_EPS:
             return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "7–14DTE 1.5R 全平")
         return ExitDecision(ExitAction.HOLD, None)
 
-    # ≥14：1.5R 减半；剩余最低 2R 全平（若目标≥2R）
+    # ≥14 裸买，或借方任意 DTE≥7：1.5R 减半；剩余最低 2R 全平（若目标≥2R）
+    # 若尚未减半但已跳空至 ≥2R → 直接全平（避免只减半留下已达 2R 的剩余）
     if remaining_fraction >= 0.999:
-        if pnl_r >= 1.5:
-            if full_at_1_5:
+        if full_at_1_5:
+            if pnl_r >= 1.5 - _R_EPS:
                 return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "目标<2R → 1.5R 全平")
-            return ExitDecision(ExitAction.CLOSE_HALF, ExitReason.TAKE_HALF, "1.5R 减半")
+        else:
+            if pnl_r >= 2.0 - _R_EPS:
+                return ExitDecision(
+                    ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "未减半已达 2R（跳空）全平"
+                )
+            if pnl_r >= 1.5 - _R_EPS:
+                return ExitDecision(ExitAction.CLOSE_HALF, ExitReason.TAKE_HALF, "1.5R 减半")
     else:
-        if pnl_r >= 2.0:
+        if pnl_r >= 2.0 - _R_EPS:
             return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "剩余 2R 全平")
 
     return ExitDecision(ExitAction.HOLD, None)
@@ -109,13 +121,20 @@ def credit_spread_exit(
         return ExitDecision(
             ExitAction.CLOSE_ALL, ExitReason.STOP_1R, "短腿 Delta >0.50 平仓"
         )
-    if pnl_r <= -1.0:
+    if pnl_r <= -1.0 + _R_EPS:
         return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.STOP_1R, "信用价差亏损 1R")
-    if pnl_r >= 1.0:
+    if pnl_r >= 1.0 - _R_EPS:
         return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.TAKE_PROFIT, "信用价差盈利 1R")
 
-    if dte < TIME_STOP_DTE and pnl_r < 1.0:
-        if short_leg_distance_atr is not None and short_leg_distance_atr < 1.0:
+    if dte < TIME_STOP_DTE and pnl_r < 1.0 - _R_EPS:
+        if short_leg_distance_atr is None:
+            # 缺 ATR 不可假设「够远」——保守平仓（§3.5.2）
+            return ExitDecision(
+                ExitAction.CLOSE_ALL,
+                ExitReason.TIME_STOP,
+                "DTE<7 未达 1R 且未提供短腿距 ATR → 保守平仓",
+            )
+        if short_leg_distance_atr < 1.0:
             return ExitDecision(
                 ExitAction.CLOSE_ALL,
                 ExitReason.TIME_STOP,
@@ -142,8 +161,8 @@ def iv_path_override(
     abs_up = iv_now - iv_entry
     if abs_up > 10.0:
         return ExitDecision(ExitAction.HOLD, None, "IV 绝对上升 >10 点，继续持有剩余")
-    if iv_entry > 0 and (iv_entry - iv_now) / iv_entry > 0.20:
-        return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.IV_CRUSH_EXIT, "IV 相对下降 >20% 全平")
+    if iv_entry > 0 and (iv_entry - iv_now) / iv_entry >= 0.20:
+        return ExitDecision(ExitAction.CLOSE_ALL, ExitReason.IV_CRUSH_EXIT, "IV 相对下降 ≥20% 全平")
     return None
 
 

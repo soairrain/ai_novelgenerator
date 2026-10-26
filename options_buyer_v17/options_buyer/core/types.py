@@ -110,7 +110,7 @@ class Position:
     r_per_contract: float = 0.0  # 单张 1R（报价单位）
     remaining_fraction: float = 1.0
     added_once: bool = False
-    is_add: bool = False  # 本笔是否为加仓（加仓不计入止损计数）
+    is_add: bool = False  # 本笔是否为加仓腿；整笔止损仍计 1 笔，不因加仓多计
     dte_at_entry: int = 30
     structure_target_r: float = 1.5
     margin: float = 0.0  # 信用价差保证金美元

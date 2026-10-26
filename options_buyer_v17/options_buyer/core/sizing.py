@@ -77,10 +77,16 @@ def can_open_premium(
     day_loss = max(0.0, -account.day_realized_pnl)
 
     if strategy == StrategyType.CREDIT_SPREAD:
-        # 文稿：保证金与权利金预算独立；信用实际约束通常是保证金。
-        # 「日亏+新仓权利金≤2%」针对买方权利金；信用不把 max_loss 叠进权利金口径。
-        if day_loss >= account.equity * DAY_LOSS_HARD_CAP - 1e-9:
+        # 文稿：保证金与权利金预算独立；信用实际约束通常是保证金（可至 3%）。
+        # 「日亏+新仓权利金≤2%」不把信用 max_loss 叠进权利金口径。
+        # 但若当日已有亏损，剩余日亏额度不足以覆盖本笔最大亏损 → 拒开（防开仓即触达硬上限）。
+        risk = max_loss if max_loss is not None else margin
+        day_cap = account.equity * DAY_LOSS_HARD_CAP
+        if day_loss >= day_cap - 1e-9:
             return False, "日已实现净亏损已达 2%"
+        remaining = day_cap - day_loss
+        if day_loss > 0 and risk > remaining + 1e-9:
+            return False, "日已实现净亏损 + 新仓最大亏损超过 2%"
         if not credit_margin_ok(account.equity, margin):
             return False, "单笔信用价差保证金超过账户 3%"
         # 合计保证金也不应无界膨胀（单笔已 ≤3%；多笔合计再给一层软顶 = 权益）
@@ -127,13 +133,22 @@ def signal_add_ok(
     category: StrategyCategory,
     existing_premium: float,
     add_premium: float,
+    strategy: StrategyType = StrategyType.LONG,
+    first_leg_profitable: bool = True,
+    already_added: bool = False,
 ) -> tuple[bool, str]:
-    """单信号加仓后总权利金 ≤ 1%。"""
+    """单信号加仓：仅一次、首仓盈利、加仓后总权利金 ≤ 1%。"""
+    if already_added:
+        return False, "单信号已加仓一次，禁止再加"
+    if not first_leg_profitable:
+        return False, "首仓未盈利，禁止加仓"
+    if strategy == StrategyType.CREDIT_SPREAD:
+        return False, "信用价差不加仓路径"
     if existing_premium + add_premium > account.equity * SIGNAL_PREMIUM_MAX + 1e-9:
         return False, "单信号加仓后总权利金超过账户 1%"
     return can_open_premium(
         account,
         new_premium=add_premium,
         category=category,
-        strategy=StrategyType.LONG,
+        strategy=strategy,
     )

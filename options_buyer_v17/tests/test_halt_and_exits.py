@@ -27,7 +27,7 @@ def test_win_resets_consecutive():
 
 
 def test_add_loss_2r_counts_one_stop_via_paper():
-    """加仓后整笔亏 2R 仍只记 1 笔止损。"""
+    """加仓后整笔亏 2R 仍只记 1 笔止损（不因加仓多计）。"""
     a = AccountState(equity=50_000)
     broker = PaperBroker(a)
     p = broker.open_long(
@@ -37,6 +37,8 @@ def test_add_loss_2r_counts_one_stop_via_paper():
         dte=30,
         structure_target_r=2.0,
         is_add=True,
+        existing_premium=200.0,
+        first_leg_profitable=True,
     )
     assert p and p.is_add
     # 亏 2R：r=1.0，mark=0 → pnl_r = -2
